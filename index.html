@@ -310,7 +310,7 @@ const auth = firebase.auth();
 const db = firebase.firestore();
 
 // ===== 2. GLOBAL STATE & UTILS =====
-const FAMILY_ID = "akun_keluarga_utama"; // ID Sentral ditambahkan
+const FAMILY_ID = "akun_keluarga_utama";
 
 const MONTHS = ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
 
@@ -378,21 +378,26 @@ auth.onAuthStateChanged(async (user) => {
     currentUser = user;
     setLoading(true);
     
-    // Tarik setting & aktifkan realtime listeners (Perubahan Disini)
-    await loadSettings();
-    await setupRealtimeListeners();
-    
-    document.getElementById('authScreen').style.display = 'none';
-    document.getElementById('appScreen').style.display = 'flex';
-    setLoading(false);
-    // renderPage() akan otomatis dipanggil oleh realtime listener
+    try {
+      await loadSettings();
+      await setupRealtimeListeners();
+      
+      document.getElementById('authScreen').style.display = 'none';
+      document.getElementById('appScreen').style.display = 'flex';
+      renderPage();
+    } catch (error) {
+      showToast('❌ Gagal memuat data: ' + error.message);
+      console.error(error);
+      auth.signOut();
+    } finally {
+      setLoading(false);
+    }
   }
 });
 
 // ===== 4. FIREBASE DATA HANDLERS =====
-// Fungsi sinkronisasi realtime baru (Perubahan Disini)
 function setupRealtimeListeners() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let isTxLoaded = false;
     let isBudgetLoaded = false;
 
@@ -400,19 +405,19 @@ function setupRealtimeListeners() {
       if (isTxLoaded && isBudgetLoaded) resolve();
     }
 
-    // Listener Transaksi Real-time
     db.collection('users').doc(FAMILY_ID).collection('transactions')
       .onSnapshot((snap) => {
         transactions = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         isTxLoaded = true;
         checkResolve();
-        // Render ulang layar otomatis kalau ada perubahan masuk
         if (document.getElementById('appScreen').style.display !== 'none') {
           renderPage();
         }
+      }, (error) => {
+        console.error("Error dari Firebase Transaksi:", error);
+        reject(error);
       });
 
-    // Listener Anggaran Real-time
     db.collection('users').doc(FAMILY_ID).collection('budgets')
       .onSnapshot((snap) => {
         budgets = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -421,6 +426,9 @@ function setupRealtimeListeners() {
         if (document.getElementById('appScreen').style.display !== 'none') {
           renderPage();
         }
+      }, (error) => {
+        console.error("Error dari Firebase Anggaran:", error);
+        reject(error);
       });
   });
 }
@@ -475,8 +483,6 @@ async function saveTransaction() {
     await db.collection('users').doc(FAMILY_ID).collection('transactions').add({
       name, cat, amount: Number(amount), type: txType, date, createdAt: new Date().toISOString()
     });
-    
-    // (Perubahan Disini: Tidak perlu load manual lagi)
     closeModal();
     showToast('✓ Transaksi disimpan!');
   } catch(e) {
@@ -489,7 +495,6 @@ async function saveTransaction() {
 async function deleteTransaction(id) {
   try {
     await db.collection('users').doc(FAMILY_ID).collection('transactions').doc(id).delete();
-    // (Perubahan Disini: Tidak perlu load manual lagi)
     showToast('✓ Transaksi dihapus');
   } catch(e) {
     showToast('❌ Error hapus: ' + e.message);
@@ -529,8 +534,6 @@ async function saveBudget() {
         await db.collection('users').doc(FAMILY_ID).collection('budgets').add({ cat, limit });
       }
     }
-    
-    // (Perubahan Disini: Tidak perlu load manual lagi)
     closeBudgetModal();
     showToast('✓ Anggaran diperbarui!');
   } catch (e) {
@@ -555,6 +558,12 @@ function calcSummary() {
   const txs = getMonthTx();
   const income = txs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
   const expense = txs.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
+  return { income, expense, saldo: income - expense };
+}
+
+function calcAllTimeSummary() {
+  const income = transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+  const expense = transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
   return { income, expense, saldo: income - expense };
 }
 
@@ -583,8 +592,11 @@ function renderPage() {
 
 function renderDashboard(el) {
   document.getElementById('pageTitle').textContent = 'Ringkasan ' + MONTHS[currentMonth];
-  document.getElementById('pageSubtitle').textContent = 'Kondisi keuangan keluarga bulan ini';
+  document.getElementById('pageSubtitle').textContent = 'Kondisi keuangan keluarga';
+  
   const { income, expense, saldo } = calcSummary();
+  const allTime = calcAllTimeSummary(); 
+
   const txs = getMonthTx().sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 6);
 
   const cats = {};
@@ -607,17 +619,38 @@ function renderDashboard(el) {
   const overallBarColor = overallPct > 100 ? '#C1440E' : overallPct > 75 ? '#B5651D' : '#52B788';
 
   el.innerHTML = `
-    <div class="summary-grid">
-      <div class="summary-card green"><div class="summary-deco"></div><div class="summary-label">Pemasukan</div><div class="summary-amount">${fmt(income)}</div><div class="summary-change">✓ Bulan ini</div></div>
-      <div class="summary-card red"><div class="summary-deco"></div><div class="summary-label">Pengeluaran</div><div class="summary-amount">${fmt(expense)}</div><div class="summary-change">✓ Bulan ini</div></div>
-      <div class="summary-card amber"><div class="summary-deco"></div><div class="summary-label">Saldo Bersih</div><div class="summary-amount">${fmt(saldo)}</div><div class="summary-change">${saldo >= 0 ? '✓ Surplus' : '⚠ Defisit'}</div></div>
+    <div class="panel" style="margin-bottom: 28px; background: var(--text); color: white; border: none; border-radius: var(--radius); box-shadow: 0 10px 24px rgba(0,0,0,0.1);">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; padding: 28px 32px; gap: 20px;">
+        <div>
+          <div style="font-size: 12px; color: #A09A8E; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px;">Total Saldo Keseluruhan</div>
+          <div style="font-family: 'DM Serif Display', serif; font-size: 38px; line-height: 1;">${fmt(allTime.saldo)}</div>
+        </div>
+        <div style="display: flex; gap: 32px; flex-wrap: wrap;">
+          <div>
+            <div style="font-size: 12px; color: #A09A8E; margin-bottom: 4px;">Total Pemasukan</div>
+            <div style="font-size: 16px; font-weight: 500; color: #52B788;">+ ${fmt(allTime.income)}</div>
+          </div>
+          <div>
+            <div style="font-size: 12px; color: #A09A8E; margin-bottom: 4px;">Total Pengeluaran</div>
+            <div style="font-size: 16px; font-weight: 500; color: #F5C4AD;">− ${fmt(allTime.expense)}</div>
+          </div>
+        </div>
+      </div>
     </div>
+
+    <div style="font-size: 14px; font-weight: 600; margin-bottom: 14px;">Ringkasan Bulan Ini (${MONTHS[currentMonth]})</div>
+    <div class="summary-grid">
+      <div class="summary-card green"><div class="summary-deco"></div><div class="summary-label">Pemasukan</div><div class="summary-amount">${fmt(income)}</div><div class="summary-change">Bulan ini</div></div>
+      <div class="summary-card red"><div class="summary-deco"></div><div class="summary-label">Pengeluaran</div><div class="summary-amount">${fmt(expense)}</div><div class="summary-change">Bulan ini</div></div>
+      <div class="summary-card amber"><div class="summary-deco"></div><div class="summary-label">Saldo Bersih</div><div class="summary-amount">${fmt(saldo)}</div><div class="summary-change">${saldo >= 0 ? 'Surplus' : 'Defisit'}</div></div>
+    </div>
+
     <div class="two-col">
       <div class="panel">
         <div class="panel-header"><div class="panel-title">Transaksi Terbaru</div><span class="panel-action" onclick="setPage('transaksi')">Lihat semua →</span></div>
         <div class="panel-body">
           ${txs.length === 0 ? `<div class="empty"><div class="empty-icon">📭</div>Belum ada transaksi bulan ini</div>` : txs.map(t => `
-            <div class="tx-item">
+            <div class="tx-item" ondblclick="deleteTransaction('${t.id}')">
               <div class="tx-icon" style="background:${CAT_COLORS[t.cat]||'#ccc'}22;">${CAT_EMOJI[t.cat] || '📦'}</div>
               <div class="tx-info"><div class="tx-name">${t.name}</div><div class="tx-cat">${t.cat}</div></div>
               <div class="tx-right"><div class="tx-amount ${t.type}">${t.type === 'income' ? '+' : '−'}${fmt(t.amount)}</div><div class="tx-date">${formatDate(t.date)}</div></div>
